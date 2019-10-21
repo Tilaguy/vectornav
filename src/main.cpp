@@ -1,7 +1,8 @@
 #include <iostream>
-#include <iomanip>
-#include <bitset>
-#include <string>
+#include <cstdio>
+#include <cmath>
+#include <stdlib.h>
+#include <string.h>
 #define PI 3.14159265358979323846  /* pi */
 
 // ROS Libraries
@@ -14,8 +15,8 @@
 #include "sensor_msgs/FluidPressure.h"
 #include "std_srvs/Empty.h"
 
-ros::Publisher pubIMU, pubMag, pubGPS, pubTemp, pubPres;
-
+ros::Publisher pubIMU, pubMag, pubGPS, pubOdom, pubTemp, pubPres;
+ros::ServiceServer resetOdomSrv;
 
 //Unused covariances initilized to zero's
 boost::array<double, 9ul> linear_accel_covariance = { };
@@ -26,8 +27,9 @@ boost::array<double, 3ul> baseline_position = { };
 XmlRpc::XmlRpcValue rpc_temp;
 
 // Custom user data to pass to packet callback function
-struct UserData {
-    int device_family;
+struct UserData
+{
+  int device_family;
 };
 
 // Include this header file to get access to VectorNav sensors.
@@ -46,57 +48,56 @@ using namespace vn::protocol::uart;
 using namespace vn::xplat;
 
 // Global Variables
-int cont=0;
-double flag1=0;
+bool flag = 1; // Falg to indicate the first time of execution
+bool flag2 = 1; // Falg to indicate the first time of execution
+bool flag1 = 0; // Falg to indicate the first time of execution
 vec3d pos_o;
 
-YawPitchRollMagneticAccelerationAndAngularRatesRegister reg;
-QuaternionMagneticAccelerationAndAngularRatesRegister reg2;
-vec3f reg3;
-FilterMeasurementsVarianceParametersRegister reg4;
-ImuMeasurementsRegister reg5;
-
-
-
 // Method declarations for future use.
-void asciiAsyncMessageReceived(void* userData, Packet& p, size_t index);
-//void OtherSensors();
+void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index);
+void ConnectionState(void *userData, const char *rawData, size_t length, size_t runningIndex);
+void ClearCharArray(char *Data, int length);
 
 std::string frame_id;
-// Boolean to use ned or enu frame. Defaults to enu which is data format from sensor.
 bool tf_ned_to_enu;
+bool frame_based_enu;
 
 // Basic loop so we can initilize our covariance parameters above
-boost::array<double, 9ul> setCov(XmlRpc::XmlRpcValue rpc){
-    // Output covariance vector
-    boost::array<double, 9ul> output = { 0.0 };
+boost::array<double, 9ul> setCov(XmlRpc::XmlRpcValue rpc)
+{
+  // Output covariance vector
+  boost::array<double, 9ul> output = { 0.0 };
 
-    // Convert the RPC message to array
-    ROS_ASSERT(rpc.getType() == XmlRpc::XmlRpcValue::TypeArray);
+  // Convert the RPC message to array
+  ROS_ASSERT(rpc.getType() == XmlRpc::XmlRpcValue::TypeArray);
 
-    for(int i = 0; i < 9; i++){
-        ROS_ASSERT(rpc[i].getType() == XmlRpc::XmlRpcValue::TypeDouble);
-        output[i] = (double)rpc[i];
-    }
-    return output;
+  for (int i = 0; i < 9; i++)
+  {
+    ROS_ASSERT(rpc[i].getType() == XmlRpc::XmlRpcValue::TypeDouble);
+    output[i] = (double)rpc[i];
+  }
+  return output;
 }
 
 // Basic loop so we can initilize our baseline position configuration above
-boost::array<double, 3ul> setPos(XmlRpc::XmlRpcValue rpc){
-    // Output covariance vector
-    boost::array<double, 3ul> output = { 0.0 };
+boost::array<double, 3ul> setPos(XmlRpc::XmlRpcValue rpc)
+{
+  // Output covariance vector
+  boost::array<double, 3ul> output = { 0.0 };
 
-    // Convert the RPC message to array
-    ROS_ASSERT(rpc.getType() == XmlRpc::XmlRpcValue::TypeArray);
+  // Convert the RPC message to array
+  ROS_ASSERT(rpc.getType() == XmlRpc::XmlRpcValue::TypeArray);
 
-    for(int i = 0; i < 3; i++){
-        ROS_ASSERT(rpc[i].getType() == XmlRpc::XmlRpcValue::TypeDouble);
-        output[i] = (double)rpc[i];
-    }
-    return output;
+  for (int i = 0; i < 3; i++)
+  {
+    ROS_ASSERT(rpc[i].getType() == XmlRpc::XmlRpcValue::TypeDouble);
+    output[i] = (double)rpc[i];
+  }
+  return output;
 }
 
-int main(int argc, char *argv[]){
+int main(int argc, char *argv[])
+{
 
   // ROS node init
   ros::init(argc, argv, "vectornav");
@@ -106,6 +107,7 @@ int main(int argc, char *argv[]){
   pubIMU = n.advertise<sensor_msgs::Imu>("vectornav/IMU", 1000);
   pubMag = n.advertise<sensor_msgs::MagneticField>("vectornav/Mag", 1000);
   pubGPS = n.advertise<sensor_msgs::NavSatFix>("vectornav/GPS", 1000);
+  pubOdom = n.advertise<nav_msgs::Odometry>("vectornav/Odom", 1000);
   pubTemp = n.advertise<sensor_msgs::Temperature>("vectornav/Temp", 1000);
   pubPres = n.advertise<sensor_msgs::FluidPressure>("vectornav/Pres", 1000);
 
@@ -127,470 +129,487 @@ int main(int argc, char *argv[]){
   pn.param<int>("fixed_imu_rate", SensorImuRate, 800);
 
   //Call to set covariances
-  if(pn.getParam("linear_accel_covariance",rpc_temp)){
-      linear_accel_covariance = setCov(rpc_temp);
+  if (pn.getParam("linear_accel_covariance", rpc_temp))
+  {
+    linear_accel_covariance = setCov(rpc_temp);
   }
-  if(pn.getParam("angular_vel_covariance",rpc_temp)){
-      angular_vel_covariance = setCov(rpc_temp);
+  if (pn.getParam("angular_vel_covariance", rpc_temp))
+  {
+    angular_vel_covariance = setCov(rpc_temp);
   }
-  if(pn.getParam("orientation_covariance",rpc_temp)){
-      orientation_covariance = setCov(rpc_temp);
+  if (pn.getParam("orientation_covariance", rpc_temp))
+  {
+    orientation_covariance = setCov(rpc_temp);
   }
 
   //Call to set antenna A offset
-  if(pn.getParam("Antenna_A_offset",rpc_temp)){
-      Antenna_A_offset = setPos(rpc_temp);
+  if (pn.getParam("Antenna_A_offset", rpc_temp))
+  {
+    Antenna_A_offset = setPos(rpc_temp);
   }
   //Call to set baseline position configuration
-  if(pn.getParam("baseline_position",rpc_temp)){
-      baseline_position = setPos(rpc_temp);
+  if (pn.getParam("baseline_position", rpc_temp))
+  {
+    baseline_position = setPos(rpc_temp);
   }
 
   ROS_INFO("Connecting to: %s @ %d Baud", SensorPort.c_str(), SensorBaudrate);
-	// This example walks through using the VectorNav C++ Library to connect to
-	// and interact with a VectorNav sensor.
+  // This example walks through using the VectorNav C++ Library to connect to
+  // and interact with a VectorNav sensor.
 
-/*
-	// First determine which COM port your sensor is attached to and update the
-	// constant below. Also, if you have changed your sensor from the factory
-	// default baudrate of 115200, you will need to update the baudrate
-	// constant below as well.
-	// const string SensorPort = "COM1";                             // Windows format for physical and virtual (USB) serial port.
-	// const string SensorPort = "/dev/ttyS1";                    // Linux format for physical serial port.
-	const string SensorPort = "/dev/ttyUSB0";                  // Linux format for virtual (USB) serial port.
-	// const string SensorPort = "/dev/tty.usbserial-FTXXXXXX";   // Mac OS X format for virtual (USB) serial port.
-	// const string SensorPort = "/dev/ttyS0";                    // CYGWIN format. Usually the Windows COM port number minus 1. This would connect to COM1.
-	const uint32_t SensorBaudrate = 115200;
-*/
-	// Now let's create a VnSensor object and use it to connect to our sensor.
-	VnSensor vs;
-	vs.connect(SensorPort, SensorBaudrate);
+  // Now let's create a VnSensor object and use it to connect to our sensor.
+  VnSensor vs;
+  vs.connect(SensorPort, SensorBaudrate);
 
   // Now we verify connection (Should be good if we made it this far)
-  if(vs.verifySensorConnectivity()){
+  if (vs.verifySensorConnectivity()){
     ROS_INFO("Device connection established");
   }else{
     ROS_ERROR("No device communication");
   }
 
-	// Let's query the sensor's model number.
-	string mn = vs.readModelNumber();
+  // Let's query the sensor's model number.
+  string mn = vs.readModelNumber();
   ROS_INFO("Model Number: %s\n", mn.c_str());
 
-	// Let's do some simple reconfiguration of the sensor. As it comes from the
-	// factory, the sensor outputs asynchronous data at 40 Hz.
-  ROS_INFO("Current resgister configuration.....................................");
-	vs.writeAsyncDataOutputFrequency(40); // see table 6.2.8
-	uint32_t newHz = vs.readAsyncDataOutputFrequency();
-  ROS_INFO("Async Frequency:\t%d Hz", newHz);
+  ROS_INFO("Restarting factory configuration .....................................");
+  vs.restoreFactorySettings();
+  Thread::sleepSec(3);
+
+  // Let's do some simple reconfiguration of the sensor. As it comes from the
+  // factory, the sensor outputs asynchronous data at 40 Hz.
+  ROS_INFO("New resgister configuration.........................................");
+  vs.writeAsyncDataOutputFrequency(async_output_rate); // see table 6.2.8
+  uint32_t newHz = vs.readAsyncDataOutputFrequency();
+  ROS_INFO("Async output frequency:\t%d Hz", newHz);
 
   //added by Harold
-	ImuRateConfigurationRegister IMUR = vs.readImuRateConfiguration();
-	IMUR.imuRate = 800;
-	vs.writeImuRateConfiguration(IMUR);
-	IMUR = vs.readImuRateConfiguration();
+  ImuRateConfigurationRegister IMUR = vs.readImuRateConfiguration();
+  IMUR.imuRate = SensorImuRate;
+  vs.writeImuRateConfiguration(IMUR);
+  IMUR = vs.readImuRateConfiguration();
   ROS_INFO("IMU Frequency:\t\t%d Hz", IMUR.imuRate);
 
   ROS_INFO("...VPE Resgister....................................................");
-	VpeBasicControlRegister vpeReg = vs.readVpeBasicControl();
-	// Enable *********************************************************************
-	vpeReg.enable = VPEENABLE_ENABLE;
-	// Heading Mode ***************************************************************
+  VpeBasicControlRegister vpeReg = vs.readVpeBasicControl();
+  // Enable *********************************************************************
+  vpeReg.enable = VPEENABLE_ENABLE;
+  // Heading Mode ***************************************************************
   vpeReg.headingMode = HEADINGMODE_RELATIVE;
-	// vpeReg.headingMode = HEADINGMODE_ABSOLUTE;
-	// vpeReg.headingMode = HEADINGMODE_INDOOR;
-	// Filtering Mode *************************************************************
-	vpeReg.filteringMode = VPEMODE_MODE1;
-	// Tuning Mode ****************************************************************
-	// vpeReg.tuningMode = VPEMODE_OFF;
-	vpeReg.tuningMode = VPEMODE_MODE1;
-	vs.writeVpeBasicControl(vpeReg);
-	vpeReg = vs.readVpeBasicControl();
+  // vpeReg.headingMode = HEADINGMODE_ABSOLUTE;
+  // vpeReg.headingMode = HEADINGMODE_INDOOR;
+  // Filtering Mode *************************************************************
+  vpeReg.filteringMode = VPEMODE_MODE1;
+  // Tuning Mode ****************************************************************
+  // vpeReg.tuningMode = VPEMODE_OFF;
+  vpeReg.tuningMode = VPEMODE_MODE1;
+  vs.writeVpeBasicControl(vpeReg);
+  vpeReg = vs.readVpeBasicControl();
   ROS_INFO("Enable:\t\t%d", vpeReg.enable);
   ROS_INFO("Heading Mode:\t%d", vpeReg.headingMode);
   ROS_INFO("Filtering Mode:\t%d", vpeReg.filteringMode);
   ROS_INFO("Tuning Mode:\t%d", vpeReg.tuningMode);
   ROS_INFO("...INS Resgister....................................................");
-	InsBasicConfigurationRegisterVn300 InsReg = vs.readInsBasicConfigurationVn300();
-	// Scenario *******************************************************************
-	//InsReg.scenario = SCENARIO_AHRS;
-	InsReg.scenario = SCENARIO_INSWITHPRESSURE;
-	//InsReg.scenario = SCENARIO_INSWITHOUTPRESSURE;
-	//InsReg.scenario = SCENARIO_GPSMOVINGBASELINEDYNAMIC;
-	//InsReg.scenario = SCENARIO_GPSMOVINGBASELINESTATIC;
-	// Ahrs Aiding ****************************************************************
-	InsReg.ahrsAiding = 1;
-	// Estimation Base line *******************************************************
-	InsReg.estBaseline = 1;
-	vs.writeInsBasicConfigurationVn300(InsReg); //added by Harold
-	InsReg = vs.readInsBasicConfigurationVn300(); //added by Harold
+
+  InsBasicConfigurationRegisterVn300 InsReg = vs.readInsBasicConfigurationVn300();
+  // Scenario *******************************************************************
+  //InsReg.scenario = SCENARIO_AHRS;
+  //InsReg.scenario = SCENARIO_INSWITHPRESSURE;
+  //InsReg.scenario = SCENARIO_INSWITHOUTPRESSURE;
+  //InsReg.scenario = SCENARIO_GPSMOVINGBASELINEDYNAMIC;
+  InsReg.scenario = SCENARIO_GPSMOVINGBASELINESTATIC;
+  // Ahrs Aiding ****************************************************************
+  InsReg.ahrsAiding = 1;
+  // Estimation Base line *******************************************************
+  InsReg.estBaseline = 1;
+  vs.writeInsBasicConfigurationVn300(InsReg); //added by Harold
+  InsReg = vs.readInsBasicConfigurationVn300(); //added by Harold
   ROS_INFO("Scenario:\t%d", InsReg.scenario);
   ROS_INFO("AHRS Aiding:\t%d", InsReg.ahrsAiding);
   ROS_INFO("Base Line:\t%d", InsReg.estBaseline);
 
   ROS_INFO("...HIS Calibration..................................................");
-	MagnetometerCalibrationControlRegister hsiReg = vs.readMagnetometerCalibrationControl();
-	// HSI Mode *******************************************************************
-	hsiReg.hsiMode = HSIMODE_RUN;
-	//hsiReg.hsiMode = HSIMODE_OFF;
-	// HSI Output *****************************************************************
-	hsiReg.hsiOutput = HSIOUTPUT_USEONBOARD;
-	//hsiReg.hsiOutput = HSIOUTPUT_NOONBOARD;
-	vs.writeMagnetometerCalibrationControl(hsiReg);  //added by Harold
-	hsiReg = vs.readMagnetometerCalibrationControl();//added by Harold
+  MagnetometerCalibrationControlRegister hsiReg = vs.readMagnetometerCalibrationControl();
+  // HSI Mode *******************************************************************
+  hsiReg.hsiMode = HSIMODE_RUN;
+  //hsiReg.hsiMode = HSIMODE_OFF;
+  // HSI Output *****************************************************************
+  hsiReg.hsiOutput = HSIOUTPUT_USEONBOARD;
+  //hsiReg.hsiOutput = HSIOUTPUT_NOONBOARD;
+  vs.writeMagnetometerCalibrationControl(hsiReg);  //added by Harold
+  hsiReg = vs.readMagnetometerCalibrationControl();//added by Harold
   ROS_INFO("Mode:\t%d", hsiReg.hsiMode);
   ROS_INFO("Output:\t%d\n", hsiReg.hsiOutput);
 
   ROS_INFO("BaseLine Configuration..............................................");
-	/// BaseLine and Antenna A offset Configuration
-	vs.writeGpsAntennaOffset({0,-0.18,0});
-	vec3f Ant_offset = vs.readGpsAntennaOffset();
-  ROS_INFO("Antena A offset:\t[%.2f, %.2f, %.2f]", Ant_offset[0],Ant_offset[1],Ant_offset[2]);
-	GpsCompassBaselineRegister baseli_config = vs.readGpsCompassBaseline();
-	baseli_config.position = {0, 0.35, 0};
+  /// BaseLine and Antenna A offset Configuration
+  vs.writeGpsAntennaOffset({0, -0.18, 0});
+  vec3f Ant_offset = vs.readGpsAntennaOffset();
+  ROS_INFO("Antena A offset:\t[%.2f, %.2f, %.2f]", Ant_offset[0], Ant_offset[1], Ant_offset[2]);
+  GpsCompassBaselineRegister baseli_config = vs.readGpsCompassBaseline();
+  baseli_config.position = {0, 0.35, 0};
   // Uncertainty calculation
-  float max=0;
-  for(int i = 0; i < 3; i++){
-      if(baseli_config.position[i]>max){
-        max = baseli_config.position[i];
-      }
+  float max = 0;
+  for (int i = 0; i < 3; i++){
+    if (baseli_config.position[i] > max){
+      max = baseli_config.position[i];
+    }
   }
-  baseli_config.uncertainty = {max*0.025, max*0.025, max*0.025};
-	// baseli_config.uncertainty = {0.00875, 0.00875, 0.00875 };
-	vs.writeGpsCompassBaseline(baseli_config);
-	baseli_config = vs.readGpsCompassBaseline();
+  baseli_config.uncertainty = {max * 0.025, max * 0.025, max * 0.025};
+  // baseli_config.uncertainty = {0.00875, 0.00875, 0.00875 };
+  vs.writeGpsCompassBaseline(baseli_config);
+  baseli_config = vs.readGpsCompassBaseline();
   ROS_INFO("Position:\t\t[%.2f, %.2f, %.2f]", baseli_config.position[0], baseli_config.position[1], baseli_config.position[2]);
   ROS_INFO("Uncertainty:\t\t[%.4f, %.4f, %.4f]\n", baseli_config.uncertainty[0], baseli_config.uncertainty[1], baseli_config.uncertainty[2]);
 
-	// LOOP
+  vs.writeSettings();
+  BinaryOutputRegister bor(
+    ASYNCMODE_PORT1,
+    SensorImuRate / async_output_rate,  // update rate [ms]
+    COMMONGROUP_QUATERNION
+    | COMMONGROUP_ANGULARRATE
+    | COMMONGROUP_POSITION
+    | COMMONGROUP_ACCEL
+    | COMMONGROUP_MAGPRES,
+    TIMEGROUP_NONE,
+    IMUGROUP_NONE,
+    GPSGROUP_NONE,
+    ATTITUDEGROUP_YPRU, //<-- returning yaw pitch roll uncertainties
+    INSGROUP_INSSTATUS
+    | INSGROUP_POSLLA
+    | INSGROUP_POSECEF
+    | INSGROUP_VELBODY
+    | INSGROUP_ACCELECEF,
+    GPSGROUP_NONE);
+  vs.registerRawDataReceivedHandler(NULL, ConnectionState);
+  ROS_INFO("Initial calibration ................................................");
+  // Thread::sleepSec(10);
+  while (flag && flag2){
+    vs.send("$VNRRG,98");
+    vs.send("$VNRRG,86");
+  }
 
-	while(1){
-		if (!flag1){
-			vs.writeAsyncDataOutputType(VNGPS);
-		}
-		else {
-			// message type.
-		  // vs.writeAsyncDataOutputType(VNYPR);
-			// vs.writeAsyncDataOutputType(VNINE);
-			vs.writeAsyncDataOutputType(VNINS);
-		  // To try a different sensor output type, comment out the line for VNYPR and
-		  // uncomment one of the GPS output types
-		  //vs.writeAsyncDataOutputType(VNGPS);
-		  //vs.writeAsyncDataOutputType(VNG2S);
-		}
-	  AsciiAsync asyncType = vs.readAsyncDataOutputType();
-    ROS_INFO("ASCII Async Type: %d",asyncType);
-		//cout << "ASCII Async Type: " << asyncType << endl;
+  vs.unregisterRawDataReceivedHandler();
+  Thread::sleepSec(2);
+  vs.writeBinaryOutput1(bor);
 
-		// VnSensor object.
-		vs.registerAsyncPacketReceivedHandler(NULL, asciiAsyncMessageReceived);
+  vs.registerAsyncPacketReceivedHandler(NULL, asciiOrBinaryAsyncMessageReceived);
+  ROS_INFO("bound..............................................................");
+  while (!flag2){
+  }
 
-		// cout << "Starting sleepubMagp..................................................................................................." << endl << endl;
-		// Thread::sleepSec(5);
-		if(flag1){
-      ROS_INFO("Running.........................................................");
-      while (ros::ok()){
-        reg = vs.readYawPitchRollMagneticAccelerationAndAngularRates();
-        reg2 = vs.readQuaternionMagneticAccelerationAndAngularRates();
-        reg3 = vs.readVelocityCompensationMeasurement();
-        reg4 = vs.readFilterMeasurementsVarianceParameters();
-        reg5 = vs.readImuMeasurements();
-        //reg6 = vs.readInsSolutionEcef();
-        //cout << reg2.quat[0] <<" "<< reg2.quat[1] <<" "<< reg2.quat[2] <<" "<< reg2.quat[3] <<endl;
-        //ros::spin(); // Need to make sure we disconnect properly. Check if all ok.
-      }
-		}else{
-      ROS_INFO("Starting sleep..................................................");
-			Thread::sleepSec(5);
-		}
-		// Unregister our callback method.
-		vs.unregisterAsyncPacketReceivedHandler();
-    ros::Duration(0.5).sleep();
-	}
-  // Node has been terminated
+  vs.unregisterAsyncPacketReceivedHandler();
+
   vs.disconnect();
-  ros::Duration(0.5).sleep();
-	return 0;
+
+  return 0;
 }
 
-void asciiAsyncMessageReceived(void* userData, Packet& p, size_t index){
-  // vn::sensors::CompositeData cd = vn::sensors::CompositeData::parse(p);
-  //UserData user_data = *static_cast<UserData*>(userData);
+void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index){
+  // By default, the orientation of IMU is NED (North East Down).
+  vn::sensors::CompositeData cd = vn::sensors::CompositeData::parse(p);
+  sensor_msgs::MagneticField msgMag;
+  sensor_msgs::Imu msgIMU;
+  sensor_msgs::NavSatFix msgGPS;
+  nav_msgs::Odometry msgOdom;
+  sensor_msgs::Temperature msgTemp;
+  sensor_msgs::FluidPressure msgPres;
+  // IMU
+  msgIMU.header.stamp = ros::Time::now();
+  msgIMU.header.frame_id = frame_id;
+  if (cd.hasQuaternion() && cd.hasAngularRate() && cd.hasAcceleration()){
+    vec4f q = cd.quaternion();
+    vec3f ar = cd.angularRate();
+    vec3f acel = cd.acceleration();
+
+    if (cd.hasAttitudeUncertainty()){
+      vec3f orientationStdDev = cd.attitudeUncertainty();
+      msgIMU.orientation_covariance[0] = orientationStdDev[1] * orientationStdDev[1];
+      msgIMU.orientation_covariance[4] = orientationStdDev[0] * orientationStdDev[0];
+      msgIMU.orientation_covariance[8] = orientationStdDev[2] * orientationStdDev[2];
+    }
+    // Quaternion
+    msgIMU.orientation.x = q[1];
+    msgIMU.orientation.y = q[0];
+    msgIMU.orientation.z = q[2];
+    msgIMU.orientation.w = q[3];
+    //cout << "Binary Async Quaternion: " << q << endl;
+
+    // Angular velocity
+    msgIMU.angular_velocity.x = ar[1];
+    msgIMU.angular_velocity.y = ar[0];
+    msgIMU.angular_velocity.z = ar[2];
+    //cout << "Binary Async Angular Rate: " << ar << endl;
+
+    // Linear acceleration
+    msgIMU.linear_acceleration.x = acel[1];
+    msgIMU.linear_acceleration.y = acel[0];
+    msgIMU.linear_acceleration.z = acel[2];
+    //cout << "Binary Async Aceletation: " << acel << endl;
+    pubIMU.publish(msgIMU);
+  }
+  if (cd.hasYawPitchRoll()){
+    vec3f ypr = cd.yawPitchRoll();
+    //cout << "Binary Async YPR: " << ypr << endl;
+  }
+
+  // Magnetic Field
+  if (cd.hasMagnetic()){
+    vec3f mag = cd.magnetic();
+    msgMag.header.stamp = msgIMU.header.stamp;
+    msgMag.header.frame_id = msgIMU.header.frame_id;
+    msgMag.magnetic_field.x = mag[0];
+    msgMag.magnetic_field.y = mag[1];
+    msgMag.magnetic_field.z = mag[2];
+    pubMag.publish(msgMag);
+    //cout << "Binary Async MagneticField: " << mag << endl;
+  }
 
   // GPS
-  sensor_msgs::NavSatFix msgGPS;
-  msgGPS.header.stamp = ros::Time::now();
+  msgGPS.header.stamp = msgIMU.header.stamp;
   msgGPS.header.frame_id = frame_id;
-  // Magnetometer
-  sensor_msgs::MagneticField msgMag;
-  msgMag.header.stamp = msgGPS.header.stamp;
-  msgMag.header.frame_id = msgGPS.header.frame_id;
-  msgMag.magnetic_field.x = reg.mag[0];
-  msgMag.magnetic_field.y = reg.mag[1];
-  msgMag.magnetic_field.z = reg.mag[2];
-  msgMag.magnetic_field_covariance[0] = reg4.magneticVariance[0];
-  msgMag.magnetic_field_covariance[4] = reg4.magneticVariance[1];
-  msgMag.magnetic_field_covariance[8] = reg4.magneticVariance[2];
-  // IMU
-  sensor_msgs::Imu msgIMU;
-  msgIMU.header.stamp = msgGPS.header.stamp;
-  msgIMU.header.frame_id = msgGPS.header.frame_id;
-  msgIMU.orientation.x = reg2.quat[1];
-  msgIMU.orientation.y = reg2.quat[0];
-  msgIMU.orientation.z = -reg2.quat[2];
-  msgIMU.orientation.w = reg2.quat[3];
-  msgIMU.angular_velocity.x = reg2.gyro[0];
-  msgIMU.angular_velocity.y = reg2.gyro[1];
-  msgIMU.angular_velocity.z = -reg2.gyro[2];
-  msgIMU.angular_velocity_covariance[0] = reg4.angularRateVariance[0];
-  msgIMU.angular_velocity_covariance[4] = reg4.angularRateVariance[1];
-  msgIMU.angular_velocity_covariance[8] = reg4.angularRateVariance[2];
-  msgIMU.linear_acceleration.x = reg2.accel[0];
-  msgIMU.linear_acceleration.y = reg2.accel[1];
-  msgIMU.linear_acceleration.z = -reg2.accel[2];
-  msgIMU.linear_acceleration_covariance[0] = reg4.accelerationVariance[0];
-  msgIMU.linear_acceleration_covariance[4] = reg4.accelerationVariance[1];
-  msgIMU.linear_acceleration_covariance[8] = reg4.accelerationVariance[2];
+  if (cd.hasPositionEstimatedLla() && cd.hasPositionEstimatedEcef() && cd.hasInsStatus()){
+    vec3d lla = cd.positionEstimatedLla();
+    msgGPS.latitude = lla[0];
+    msgGPS.longitude = lla[1];
+    msgGPS.altitude = lla[2];
+    pubGPS.publish(msgGPS);
+    // cout << "Binary Async GPS_LLA: " << lla << endl;
+
+    msgOdom.header.stamp = msgIMU.header.stamp;
+    msgOdom.header.frame_id = msgIMU.header.frame_id;
+    vec3d pos = cd.positionEstimatedEcef();
+    if (!flag1){
+      pos_o = pos;
+      flag1 = 1;
+    }
+    pos -= pos_o;
+    msgOdom.pose.pose.position.x = pos[0];
+    msgOdom.pose.pose.position.y = pos[1];
+    msgOdom.pose.pose.position.z = pos[2];
+    // cout << "Binary Async GPS_ECEF: " << pos << endl;
+
+    if (cd.hasQuaternion()){
+      vec4f q = cd.quaternion();
+      msgOdom.pose.pose.orientation.x = q[0];
+      msgOdom.pose.pose.orientation.y = q[1];
+      msgOdom.pose.pose.orientation.z = q[2];
+      msgOdom.pose.pose.orientation.w = q[3];
+    }
+    if (cd.hasVelocityEstimatedBody()){
+      vec3f vel = cd.velocityEstimatedBody();
+      msgOdom.twist.twist.linear.x = vel[0];
+      msgOdom.twist.twist.linear.y = vel[1];
+      msgOdom.twist.twist.linear.z = vel[2];
+      //cout << "Binary Async linear vel: " << vel << endl;
+    }
+    if (cd.hasAngularRate()){
+      vec3f ar = cd.angularRate();
+      msgOdom.twist.twist.angular.x = ar[0];
+      msgOdom.twist.twist.angular.y = ar[1];
+      msgOdom.twist.twist.angular.z = ar[2];
+      //cout << "Binary Async angRate: " << ar << endl;
+      pubOdom.publish(msgOdom);
+    }
+  }
+
   // Temperature
-  sensor_msgs::Temperature msgTemp;
-  msgTemp.header.stamp = msgGPS.header.stamp;
-  msgTemp.header.frame_id = msgGPS.header.frame_id;
-  msgTemp.temperature = reg5.temp;
-  // Pressure
-  sensor_msgs::FluidPressure msgPres;
-  msgPres.header.stamp = msgGPS.header.stamp;
-  msgPres.header.frame_id = msgGPS.header.frame_id;
-  msgPres.fluid_pressure = reg5.pressure;
-
-  // Make sure we have an ASCII packet and not a binary packet.
-  if(p.type() != Packet::TYPE_ASCII)
-    return;
-
-  // Make sure we have a VNYPR data packet.
-  if(p.determineAsciiAsyncType() == VNYPR) {
-    // We now need to parse out the yaw, pitch, roll data.
-    vec3f ypr;
-    p.parseVNYPR(&ypr);
+  if (cd.hasTemperature()){
+    float temp = cd.temperature();
+    msgTemp.header.stamp = msgIMU.header.stamp;
+    msgTemp.header.frame_id = msgIMU.header.frame_id;
+    msgTemp.temperature = temp;
+    pubTemp.publish(msgTemp);
+    //cout << "Binary Async Temperature: " << temp << endl;
   }
 
-  // If the VNGPS output type was selected, print out that data
-  else if(p.determineAsciiAsyncType() == VNGPS) {
-		//std::cout << flag1 << '\n';
-    double time;
-    uint16_t week;
-    uint8_t gpsFix;
-    uint8_t numSats;
-    vec3d lla;
-    vec3f nedVel;
-    vec3f nedAcc;
-    float speedAcc;
-    float timeAcc;
-    p.parseVNGPS(&time, &week, &gpsFix, &numSats, &lla, &nedVel, &nedAcc, &speedAcc, &timeAcc);
-		flag1 = lla[0];
+  // Barometer
+  if (cd.hasPressure()){
+    float pres = cd.pressure();
+    msgPres.header.stamp = msgIMU.header.stamp;
+    msgPres.header.frame_id = msgIMU.header.frame_id;
+    msgPres.fluid_pressure = pres;
+    //cout << "Binary Async Pressure: " << pres << endl;
+    pubPres.publish(msgPres);
   }
 
-  // If the VNG2S output type was selected, print out that data
-  else if(p.determineAsciiAsyncType() == VNG2S) {
-    double time;
-    uint16_t week;
-    uint8_t gpsFix;
-    uint8_t numSats;
-    vec3d lla;
-    vec3f nedVel;
-    vec3f nedAcc;
-    float speedAcc;
-    float timeAcc;
-
-    p.parseVNGPS(&time, &week, &gpsFix, &numSats, &lla, &nedVel, &nedAcc, &speedAcc, &timeAcc);
-    //cout << "ASCII Async GPS2: " << lla << endl;
-  }
-
-  // If the VNINE output type was selected, print out that data
-	else if(p.determineAsciiAsyncType() == VNINE) {
-    double time;
-    uint16_t week;
-    uint16_t insStatus;
-    vec3f ypr;
-		vec3d pos;
-		vec3f vel;
-		float attun;
-		float posun;
-		float velun;
-
-		p.parseVNINE(&time, &week, &insStatus, &ypr, &pos, &vel, &attun, &posun, &velun);
-		// Status analysis
-		/*cout << "Status:\t" << std::bitset<16>(insStatus) << endl;
-		switch (insStatus&3) {
-			case 0:
-				cout << "Not tracking" << endl;
-				break;
-			case 1:
-				cout << "Aligning." << endl;
-				break;
-			case 2:
-				cout << "Tracking." << endl;
-				break;
-			case 4:
-				cout << "Loss of GNSS" << endl;
-				break;
-		}
-		if(insStatus&4){
-			cout << "GNSS is fix" << endl;
-		}else{
-			cout << "GNSS is not fix" << endl;
-		}
-		if(!(insStatus&120)){
-			cout << "Not Error" << endl;
-		}else{
-			if (insStatus&16) {
-				cout << "IMU communication error is detected" << endl;
-			}else if (insStatus&32){
-				cout << "Magnetometer or Pressure sensor error is detected" << endl;
-			}else if (insStatus&64){
-				cout << "GNSS communication error is detected" << endl;
-			}
-		}
-		if(insStatus&256){
-			cout << "GNSS Compass solution is aiding the INS Filter heading" << endl;
-		}else{
-			cout << "GNSS Compass solution is not aiding the INS Filter heading" << endl;
-		}
-		if(insStatus&512){
-			cout << "GNSS compass is operational and reporting a heading solution" << endl;
-		}else{
-			cout << "GNSS compass is not operational" << endl;
-		}
-*/
-		// if(!cont)
-		// 	pos_o = pos;
-		// pos -= pos_o;
-    cout << "ASCII Async ECEF_position:\t" << pos << ypr << endl << endl;
-		// cout << "ASCII Async ECEF_status:\t" << std::bitset<16>(status) << endl;
-     if(!cont)
-		 	pos_o = pos;
-    flag1 = pos[0];
-		cont ++;
-  }
-
-	// If the VNINS output type was selected, print out that data
-	else if(p.determineAsciiAsyncType() == VNINS) {
-    double time;	// [seg]
-    uint16_t week;
-    uint16_t insStatus;
-    vec3f ypr; 	// range: Yaw=+/- 180°; Pitch=+/- 90°; Roll=+/- 180°
-		vec3d llh;	// Heigth_format: WGS84
-		vec3f vel;	// [NED]
-		float attun;
-		float posun;
-		float velun;
-
-		p.parseVNINE(&time, &week, &insStatus, &ypr, &llh, &vel, &attun, &posun, &velun);
-
-		// Status analysis
-    /*
-		cout << "Status:\t" << std::bitset<16>(insStatus) << endl;
-		switch (insStatus&3) {
-			case 0:
-				cout << "Not tracking" << endl;
-				break;
-			case 1:
-				cout << "Aligning." << endl;
-				break;
-			case 2:
-				cout << "Tracking." << endl;
-				break;
-			case 4:
-				cout << "Loss of GNSS" << endl;
-				break;
-		}
-		if(insStatus&4){
-			cout << "GNSS is fix" << endl;
-		}else{
-			cout << "GNSS is not fix" << endl;
-		}
-		if(!(insStatus&120)){
-			cout << "Not Error" << endl;
-		}else{
-			if (insStatus&16) {
-				cout << "IMU communication error is detected" << endl;
-			}else if (insStatus&32){
-				cout << "Magnetometer or Pressure sensor error is detected" << endl;
-			}else if (insStatus&64){
-				cout << "GNSS communication error is detected" << endl;
-			}
-		}
-		if(insStatus&256){
-			cout << "GNSS Compass solution is aiding the INS Filter heading" << endl;
-		}else{
-			cout << "GNSS Compass solution is not aiding the INS Filter heading" << endl;
-		}
-		if(insStatus&512){
-			cout << "GNSS compass is operational and reporting a heading solution" << endl;
-		}else{
-			cout << "GNSS compass is not operational" << endl;
-		}
-*/
-		// if(!cont)
-		// 	pos_o = pos;
-		// pos -= pos_o;
-		// printf("LLH = [%.8f,%.8f,%.8f]\tYPR = [%.4f,%.4f,%.4f]\n",llh[0],llh[1],llh[2],ypr[0],ypr[1],ypr[2]);
-		// file << std::setprecision(15) << llh[0] << "\t" << llh[1] << "\t" << llh[2] << "\t";
-		// file << cont << "\t" << ypr[0] << "\t" << ypr[1] << "\t" << ypr[2] << "\n";
-    msgGPS.status.status = insStatus;
-    msgGPS.latitude = llh[0];
-    msgGPS.longitude = llh[1];
-    msgGPS.altitude = llh[2];
-    // cout << ypr;
-    //msgGPS.position_covariance = posun;
-
-		cont ++;
-  }
-	// If the VNISE output type was selected, print out that data
-	else if(p.determineAsciiAsyncType() == VNISE) {
-    vec3f ypr;
-		vec3d pos;
-		vec3f vel;
-		vec3f acc;
-		vec3f w;
-
-    p.parseVNISE(&ypr, &pos, &vel, &acc, &w);
-		// if(!cont)
-		// 	pos_o = pos;
-		// pos -= pos_o;
-		cont ++;
-  }
-
-		// If the VNGPE output type was selected, print out that data
-		else if(p.determineAsciiAsyncType() == VNGPE) {
-			double Tow;
-			uint16_t week;
-			uint8_t GNSSFix;
-			uint8_t NumSats;
-	    vec3d pos;
-			vec3f vel;
-			vec3f PAcc;
-			float SAcc;
-			float TimeAcc;
-
-	    p.parseVNGPE(&Tow, &week, &GNSSFix, &NumSats, &pos, &vel, &PAcc, &SAcc, &TimeAcc);
-			// if(!cont)
-			// 	pos_o = pos;
-			// pos -= pos_o;
-	  }
-
-  else {
-    ROS_INFO("ASCII Async: Type(%d)......Not configurated",p.determineAsciiAsyncType());
-    //cout << "ASCII Async: Type(" << p.determineAsciiAsyncType() << ")" << endl;
-  }
-  //OtherSensors();
-  pubGPS.publish(msgGPS);
-  pubMag.publish(msgMag);
-  pubIMU.publish(msgIMU);
-  pubTemp.publish(msgTemp);
-  pubPres.publish(msgPres);
 }
-/*
-void OtherSensors(){
-  std::cout << "HOLA" << '\n';
+
+void ConnectionState(void *userData, const char *rawData, size_t length, size_t runningIndex){
+  // cout << rawData << endl;
+  char header1[] = "$VNRRG,98,"; // header of GNSS Compass Startup Status
+  char header2[] = "$VNRRG,86,"; // header of GNSS Compass Signal Health Status
+  int j = 0;
+  int Perc = 0;
+  //cout << rawData << endl;
+  // Decode register 98
+  for (int i = 0; i < length; i++){
+    if ((rawData[i] == header1[j])){
+      j++;
+      if (j == 10){
+        char Perc_char[3] = {rawData[i + 1], rawData[i + 2], rawData[i + 3]};
+        Perc = atoi(Perc_char);
+        i = length;
+        //printf("\033[A\r");
+        //printf("\33[0J\r");
+        cout << "Startup - " << Perc << "%" << endl;
+        //printf("\033[A\r");
+        if (Perc == 100)
+          flag2 = 0;
+      }
+    }
+    else{
+      j = 0;
+    }
+  }
+
+  // Decode register 86
+  float PVT_A = 0, RTK_A = 0, CN0_A = 0, PVT_B = 0, RTK_B = 0, CN0_2 = 0, ComPVT = 0, ComRTK = 0;
+  j = 0;
+  char aux[5];  // Save part of data of the message
+  int aux1;     // Save the actual index
+  int flag3 = 0;
+  ClearCharArray(aux, 5);
+  for (int i = 0; i < length; i++){
+    if ((rawData[i] == header2[j])){
+      j++;
+      if (j == 10){
+        //cout << *rawData.substr(i,i+10) << endl;
+        i++;
+        for (int k = 0; k < 5; k++){
+          // cout << "flag3: " << flag3 << endl;
+          // PVT_A
+          if ((rawData[i + k] != ',') && (flag3 == 0)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 0)){
+            PVT_A = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << PVT_A << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // RTK_A
+          if ((rawData[i + k] != ',') && (flag3 == 1)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 1)){
+            RTK_A = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << RTK_A << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // CN0_A
+          if ((rawData[i + k] != ',') && (flag3 == 2)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 2)){
+            CN0_A = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << CN0_A << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // PVT_B
+          if ((rawData[i + k] != ',') && (flag3 == 3)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 3)){
+            PVT_B = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << PVT_B << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // RTK_B
+          if ((rawData[i + k] != ',') && (flag3 == 4)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 4)){
+            RTK_B = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << RTK_B << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // CN0_2
+          if ((rawData[i + k] != ',') && (flag3 == 5)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 5)){
+            CN0_2 = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << CN0_2 << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // ComPVT
+          if ((rawData[i + k] != ',') && (flag3 == 6)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == ',') && (flag3 == 6)){
+            ComPVT = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << ComPVT << endl;
+            flag3++;
+            i += (k + 1);
+            k = 0;
+          }
+          // ComRTK
+          if ((rawData[i + k] != '*') && (flag3 == 7)){
+            //cout << rawData[i+k] << endl;
+            aux[k] = rawData[i + k];
+          }
+          else if ((rawData[i + k] == '*') && (flag3 == 7)){
+            ComRTK = atof(aux);
+            //cout << aux << endl;
+            ClearCharArray(aux, 5);
+            //cout << ComRTK << endl;
+            k = 1000;
+          }
+        }
+        cout << "PVT_A: " << PVT_A << "\tRTK_A: " << RTK_A << endl;
+        cout << "PVT_B: " << PVT_B << "\tRTK_B: " << RTK_B << endl;
+        cout << "ComPVT: " << ComPVT << "\tComRTK: "  << ComRTK << endl;
+        cout << "CNO_A: " << CN0_A << "dBHz\tCNO_B: " << CN0_2 << "dBHz" << endl;
+        // VT100 scape codes
+        // http://www.climagic.org/mirrors/VT100_Escape_Codes.html
+        printf("\033[A\r");
+        printf("\033[A\r");
+        printf("\033[A\r");
+        printf("\033[A\r");
+        printf("\033[A\r");
+      }
+    }
+    else{
+      j = 0;
+    }
+  }
 }
-*/
+
+void ClearCharArray(char *Data, int length){
+  for (int i = 0; i < length; i++){
+    Data[i] = 0;
+  }
+}
