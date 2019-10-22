@@ -261,6 +261,7 @@ int main(int argc, char *argv[])
   baseli_config = vs.readGpsCompassBaseline();
   ROS_INFO("Position:\t\t[%.2f, %.2f, %.2f]", baseli_config.position[0], baseli_config.position[1], baseli_config.position[2]);
   ROS_INFO("Uncertainty:\t\t[%.4f, %.4f, %.4f]\n", baseli_config.uncertainty[0], baseli_config.uncertainty[1], baseli_config.uncertainty[2]);
+  cout << endl << endl << endl << endl;
 
   vs.writeSettings();
   BinaryOutputRegister bor(
@@ -450,10 +451,6 @@ void ConnectionState(void *userData, const char *rawData, size_t length, size_t 
         char Perc_char[3] = {rawData[i + 1], rawData[i + 2], rawData[i + 3]};
         Perc = atoi(Perc_char);
         i = length;
-        //printf("\033[A\r");
-        //printf("\33[0J\r");
-        cout << "Startup - " << Perc << "%" << endl;
-        //printf("\033[A\r");
         if (Perc == 100)
           flag2 = 0;
       }
@@ -589,17 +586,17 @@ void ConnectionState(void *userData, const char *rawData, size_t length, size_t 
             k = 1000;
           }
         }
+        if(Perc != 100){
+          // VT100 scape codes
+          // http://www.climagic.org/mirrors/VT100_Escape_Codes.html
+          printf("\033[5A\r");
+          printf("\033[J\r");
+        }
+        printf("Startup - %3d %\n",Perc);
         cout << "PVT_A: " << PVT_A << "\tRTK_A: " << RTK_A << endl;
         cout << "PVT_B: " << PVT_B << "\tRTK_B: " << RTK_B << endl;
         cout << "ComPVT: " << ComPVT << "\tComRTK: "  << ComRTK << endl;
         cout << "CNO_A: " << CN0_A << "dBHz\tCNO_B: " << CN0_2 << "dBHz" << endl;
-        // VT100 scape codes
-        // http://www.climagic.org/mirrors/VT100_Escape_Codes.html
-        printf("\033[A\r");
-        printf("\033[A\r");
-        printf("\033[A\r");
-        printf("\033[A\r");
-        printf("\033[A\r");
       }
     }
     else{
