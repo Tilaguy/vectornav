@@ -13,9 +13,10 @@
 #include "nav_msgs/Odometry.h"
 #include "sensor_msgs/Temperature.h"
 #include "sensor_msgs/FluidPressure.h"
+#include "diagnostic_msgs/KeyValue.h"
 #include "std_srvs/Empty.h"
 
-ros::Publisher pubIMU, pubMag, pubGPS, pubOdom, pubTemp, pubPres;
+ros::Publisher pubIMU, pubMag, pubGPS, pubOdom, pubTemp, pubPres, ConStatus;
 ros::ServiceServer resetOdomSrv;
 
 //Unused covariances initilized to zero's
@@ -51,7 +52,11 @@ using namespace vn::xplat;
 bool flag = 1; // Falg to indicate the first time of execution
 bool flag2 = 1; // Falg to indicate the first time of execution
 bool flag1 = 0; // Falg to indicate the first time of execution
+int Perc = 0;
 vec3d pos_o;
+
+diagnostic_msgs::KeyValue msgKey;
+
 
 // Method declarations for future use.
 void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index);
@@ -110,6 +115,7 @@ int main(int argc, char *argv[])
   pubOdom = n.advertise<nav_msgs::Odometry>("vectornav/Odom", 1000);
   pubTemp = n.advertise<sensor_msgs::Temperature>("vectornav/Temp", 1000);
   pubPres = n.advertise<sensor_msgs::FluidPressure>("vectornav/Pres", 1000);
+  ConStatus =  n.advertise<diagnostic_msgs::KeyValue>("vectornav/ConStatus", 1000);
 
   // Serial Port Settings
   string SensorPort;
@@ -228,7 +234,7 @@ int main(int argc, char *argv[])
   ROS_INFO("AHRS Aiding:\t%d", InsReg.ahrsAiding);
   ROS_INFO("Base Line:\t%d", InsReg.estBaseline);
 
-  ROS_INFO("...HIS Calibration..................................................");
+  ROS_INFO("...HIS Calibration........Pres..........................................");
   MagnetometerCalibrationControlRegister hsiReg = vs.readMagnetometerCalibrationControl();
   // HSI Mode *******************************************************************
   hsiReg.hsiMode = HSIMODE_RUN;
@@ -282,12 +288,15 @@ int main(int argc, char *argv[])
     | INSGROUP_VELBODY
     | INSGROUP_ACCELECEF,
     GPSGROUP_NONE);
+
+  msgKey.key = "ConStatus[%]";
   vs.registerRawDataReceivedHandler(NULL, ConnectionState);
   ROS_INFO("Initial calibration ................................................");
   // Thread::sleepSec(10);
   while (flag && flag2){
     vs.send("$VNRRG,98");
     vs.send("$VNRRG,86");
+    ConStatus.publish(msgKey);
   }
 
   vs.unregisterRawDataReceivedHandler();
@@ -297,6 +306,7 @@ int main(int argc, char *argv[])
   vs.registerAsyncPacketReceivedHandler(NULL, asciiOrBinaryAsyncMessageReceived);
   ROS_INFO("bound..............................................................");
   while (!flag2){
+    ConStatus.publish(msgKey);
   }
 
   vs.unregisterAsyncPacketReceivedHandler();
@@ -441,7 +451,6 @@ void ConnectionState(void *userData, const char *rawData, size_t length, size_t 
   char header1[] = "$VNRRG,98,"; // header of GNSS Compass Startup Status
   char header2[] = "$VNRRG,86,"; // header of GNSS Compass Signal Health Status
   int j = 0;
-  int Perc = 0;
   //cout << rawData << endl;
   // Decode register 98
   for (int i = 0; i < length; i++){
@@ -450,6 +459,7 @@ void ConnectionState(void *userData, const char *rawData, size_t length, size_t 
       if (j == 10){
         char Perc_char[3] = {rawData[i + 1], rawData[i + 2], rawData[i + 3]};
         Perc = atoi(Perc_char);
+        msgKey.value = to_string(Perc);
         i = length;
         if (Perc == 100)
           flag2 = 0;
