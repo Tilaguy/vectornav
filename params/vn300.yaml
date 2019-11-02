@@ -17,7 +17,7 @@ fixed_imu_rate: 800
 frame_id: vectornavNode
 
 # Data publication form, true for East North Up or false for North East Down <- false is default setting
-tf_ned_to_enu: false
+Ecef2NED_ena: true
 
 # If publishing ENU, do we want to publish in the frame labeled on the device? Default is false.
 # If tf_ned_to_enu = true and frame_based_enu = false orientation is reported by: x->y y->x z->-z to rotate the quaternion
@@ -42,5 +42,5 @@ orientation_covariance: [0.01,  0.0,   0.0,
                             0.0,   0.01,  0.0,
                             0.0,   0.0,   0.01]
 
-Antenna_A_offset: [0.0, -0.18, 0.0]
-baseline_position: [0.0, 0.35, 0.0]
+Antenna_A_offset: [0.0, -0.17, -0.03]
+baseline_position: [0.0, 0.49, 0.0]
