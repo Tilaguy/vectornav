@@ -1,6 +1,6 @@
 #include <iostream>
 #include <cstdio>
-#include <cmath>
+//#include <cmath>
 #include <stdlib.h>
 #include <string.h>
 #define PI 3.14159265358979323846  /* pi */
@@ -19,17 +19,8 @@
 ros::Publisher pubIMU, pubMag, pubGPS, pubOdom, pubTemp, pubPres, ConStatus;
 ros::ServiceServer resetOdomSrv;
 
-//Unused covariances initilized to zero's
-boost::array<double, 9ul> linear_accel_covariance = { };
-boost::array<double, 9ul> angular_vel_covariance = { };
-boost::array<double, 9ul> orientation_covariance = { };
-boost::array<double, 3ul> Antenna_A_offset = { };
-boost::array<double, 3ul> baseline_position = { };
-XmlRpc::XmlRpcValue rpc_temp;
-
 // Custom user data to pass to packet callback function
-struct UserData
-{
+struct UserData{
   int device_family;
 };
 
@@ -48,6 +39,14 @@ using namespace vn::sensors;
 using namespace vn::protocol::uart;
 using namespace vn::xplat;
 
+//Unused covariances initilized to zero's
+boost::array<double, 9ul> linear_accel_covariance = { };
+boost::array<double, 9ul> angular_vel_covariance = { };
+boost::array<double, 9ul> orientation_covariance = { };
+vec3f Antenna_A_offset;
+vec3f baseline_position;
+XmlRpc::XmlRpcValue rpc_temp;
+
 // Global Variables
 bool flag = 1; // Falg to indicate the first time of execution
 bool flag2 = 1; // Falg to indicate the first time of execution
@@ -62,22 +61,22 @@ diagnostic_msgs::KeyValue msgKey;
 void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index);
 void ConnectionState(void *userData, const char *rawData, size_t length, size_t runningIndex);
 void ClearCharArray(char *Data, int length);
+vec3d ECEF2NED(vec3d posECEF, vec3d lla);
 
 std::string frame_id;
-bool tf_ned_to_enu;
-bool frame_based_enu;
+bool Ecef2NED_ena;
+//bool frame_based_enu;
+
 
 // Basic loop so we can initilize our covariance parameters above
-boost::array<double, 9ul> setCov(XmlRpc::XmlRpcValue rpc)
-{
+boost::array<double, 9ul> setCov(XmlRpc::XmlRpcValue rpc){
   // Output covariance vector
   boost::array<double, 9ul> output = { 0.0 };
 
   // Convert the RPC message to array
   ROS_ASSERT(rpc.getType() == XmlRpc::XmlRpcValue::TypeArray);
 
-  for (int i = 0; i < 9; i++)
-  {
+  for (int i = 0; i < 9; i++){
     ROS_ASSERT(rpc[i].getType() == XmlRpc::XmlRpcValue::TypeDouble);
     output[i] = (double)rpc[i];
   }
@@ -85,24 +84,21 @@ boost::array<double, 9ul> setCov(XmlRpc::XmlRpcValue rpc)
 }
 
 // Basic loop so we can initilize our baseline position configuration above
-boost::array<double, 3ul> setPos(XmlRpc::XmlRpcValue rpc)
-{
+vec3f setPos(XmlRpc::XmlRpcValue rpc){
   // Output covariance vector
-  boost::array<double, 3ul> output = { 0.0 };
+  vec3f output(0.0f, 0.0f, 0.0f);
 
   // Convert the RPC message to array
   ROS_ASSERT(rpc.getType() == XmlRpc::XmlRpcValue::TypeArray);
 
-  for (int i = 0; i < 3; i++)
-  {
+  for (int i = 0; i < 3; i++){
     ROS_ASSERT(rpc[i].getType() == XmlRpc::XmlRpcValue::TypeDouble);
     output[i] = (double)rpc[i];
   }
   return output;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
 
   // ROS node init
   ros::init(argc, argv, "vectornav");
@@ -128,7 +124,7 @@ int main(int argc, char *argv[])
   // Load all params
   // pn.param<type_of_data>(Param_name, Param_value, default_value)
   pn.param<std::string>("frame_id", frame_id, "vectornav");
-  pn.param<bool>("tf_ned_to_enu", tf_ned_to_enu, false);
+  pn.param<bool>("Ecef2NED", Ecef2NED_ena, false);
   pn.param<int>("async_output_rate", async_output_rate, 40);
   pn.param<std::string>("serial_port", SensorPort, "/dev/ttyUSB0");
   pn.param<int>("serial_baud", SensorBaudrate, 115200);
@@ -136,28 +132,18 @@ int main(int argc, char *argv[])
 
   //Call to set covariances
   if (pn.getParam("linear_accel_covariance", rpc_temp))
-  {
     linear_accel_covariance = setCov(rpc_temp);
-  }
   if (pn.getParam("angular_vel_covariance", rpc_temp))
-  {
     angular_vel_covariance = setCov(rpc_temp);
-  }
   if (pn.getParam("orientation_covariance", rpc_temp))
-  {
     orientation_covariance = setCov(rpc_temp);
-  }
 
   //Call to set antenna A offset
   if (pn.getParam("Antenna_A_offset", rpc_temp))
-  {
     Antenna_A_offset = setPos(rpc_temp);
-  }
   //Call to set baseline position configuration
   if (pn.getParam("baseline_position", rpc_temp))
-  {
     baseline_position = setPos(rpc_temp);
-  }
 
   ROS_INFO("Connecting to: %s @ %d Baud", SensorPort.c_str(), SensorBaudrate);
   // This example walks through using the VectorNav C++ Library to connect to
@@ -168,11 +154,10 @@ int main(int argc, char *argv[])
   vs.connect(SensorPort, SensorBaudrate);
 
   // Now we verify connection (Should be good if we made it this far)
-  if (vs.verifySensorConnectivity()){
+  if (vs.verifySensorConnectivity())
     ROS_INFO("Device connection established");
-  }else{
+  else
     ROS_ERROR("No device communication");
-  }
 
   // Let's query the sensor's model number.
   string mn = vs.readModelNumber();
@@ -249,11 +234,11 @@ int main(int argc, char *argv[])
 
   ROS_INFO("BaseLine Configuration..............................................");
   /// BaseLine and Antenna A offset Configuration
-  vs.writeGpsAntennaOffset({0, -0.18, 0});
+  vs.writeGpsAntennaOffset(Antenna_A_offset);
   vec3f Ant_offset = vs.readGpsAntennaOffset();
   ROS_INFO("Antena A offset:\t[%.2f, %.2f, %.2f]", Ant_offset[0], Ant_offset[1], Ant_offset[2]);
   GpsCompassBaselineRegister baseli_config = vs.readGpsCompassBaseline();
-  baseli_config.position = {0, 0.35, 0};
+  baseli_config.position = baseline_position;
   // Uncertainty calculation
   float max = 0;
   for (int i = 0; i < 3; i++){
@@ -394,7 +379,10 @@ void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index){
       pos_o = pos;
       flag1 = 1;
     }
-    pos -= pos_o;
+    //pos -= pos_o;
+    if (Ecef2NED_ena){
+      pos = ECEF2NED(pos,lla);
+    }
     msgOdom.pose.pose.position.x = pos[0];
     msgOdom.pose.pose.position.y = pos[1];
     msgOdom.pose.pose.position.z = pos[2];
@@ -619,4 +607,30 @@ void ClearCharArray(char *Data, int length){
   for (int i = 0; i < length; i++){
     Data[i] = 0;
   }
+}
+
+vec3d ECEF2NED(vec3d posECEF, vec3d lla){
+  #include <math.h>
+  // Convert ECEF to NED
+  // https://www.mathworks.com/help/aeroblks/directioncosinematrixeceftoned.html
+  double lat_r = lla[0]*PI/180.0;// Lat in rad
+  double lon_r = lla[1]*PI/180.0;// Long in rad
+  cout << "lat:" << lat_r << ", lon:" << lon_r << endl;
+  mat3d DCM;
+  DCM.e00 = -1.0*sin(lat_r)*cos(lon_r);
+  DCM.e01 = -1.0*sin(lat_r)*sin(lon_r);
+  DCM.e02 = cos(lat_r);
+  DCM.e10 = -1.0*sin(lon_r);
+  DCM.e11 = cos(lon_r);
+  DCM.e12 = 0.0;
+  DCM.e20 = -1.0*cos(lat_r)*cos(lon_r);
+  DCM.e21 = cos(lat_r)*sin(lon_r);
+  DCM.e22 = -1.0*sin(lat_r);
+  vec3d pos_NED;
+  pos_NED.x = DCM.e00*posECEF.x + DCM.e01*posECEF.y + DCM.e02*posECEF.z;
+  pos_NED.y = DCM.e10*posECEF.x + DCM.e11*posECEF.y + DCM.e12*posECEF.z;
+  pos_NED.z = DCM.e20*posECEF.x + DCM.e21*posECEF.y + DCM.e22*posECEF.z;
+  cout << DCM << endl;
+  cout << pos_NED << endl;
+  //return pos_NED;
 }
