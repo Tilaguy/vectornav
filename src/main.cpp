@@ -3,7 +3,7 @@
 //#include <cmath>
 #include <stdlib.h>
 #include <string.h>
-#define PI 3.14159265358979323846  /* pi */
+//#define PI 3.14159265358979323846  /* pi */
 
 // ROS Libraries
 #include "ros/ros.h"
@@ -15,8 +15,10 @@
 #include "sensor_msgs/FluidPressure.h"
 #include "diagnostic_msgs/KeyValue.h"
 #include "std_srvs/Empty.h"
+#include <tf2/LinearMath/Transform.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
-ros::Publisher pubIMU, pubMag, pubGPS, pubOdom, pubTemp, pubPres, ConStatus;
+ros::Publisher pubIMU, pubMag, pubGPS, pubOdom, pubTemp, pubPres, ConnStatus;
 ros::ServiceServer resetOdomSrv;
 
 // Custom user data to pass to packet callback function
@@ -61,11 +63,12 @@ diagnostic_msgs::KeyValue msgKey;
 void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index);
 void ConnectionState(void *userData, const char *rawData, size_t length, size_t runningIndex);
 void ClearCharArray(char *Data, int length);
-vec3d ECEF2NED(vec3d posECEF, vec3d lla);
+vec3d ECEF2ENU(vec3d posECEF, vec3d lla);
 
 std::string frame_id;
-bool Ecef2NED_ena;
-//bool frame_based_enu;
+bool tf_ned_to_enu;
+bool frame_based_enu;
+bool ENU_flag;
 
 
 // Basic loop so we can initilize our covariance parameters above
@@ -111,7 +114,7 @@ int main(int argc, char *argv[]){
   pubOdom = n.advertise<nav_msgs::Odometry>("vectornav/Odom", 1000);
   pubTemp = n.advertise<sensor_msgs::Temperature>("vectornav/Temp", 1000);
   pubPres = n.advertise<sensor_msgs::FluidPressure>("vectornav/Pres", 1000);
-  ConStatus =  n.advertise<diagnostic_msgs::KeyValue>("vectornav/ConStatus", 1000);
+  ConnStatus =  n.advertise<diagnostic_msgs::KeyValue>("vectornav/ConnStatus", 1000);
 
   // Serial Port Settings
   string SensorPort;
@@ -124,8 +127,10 @@ int main(int argc, char *argv[]){
   // Load all params
   // pn.param<type_of_data>(Param_name, Param_value, default_value)
   pn.param<std::string>("frame_id", frame_id, "vectornav");
-  pn.param<bool>("Ecef2NED", Ecef2NED_ena, false);
-  pn.param<int>("async_output_rate", async_output_rate, 40);
+  pn.param<bool>("tf_ned_to_enu", tf_ned_to_enu, false);
+  pn.param<bool>("frame_based_enu", frame_based_enu, false);
+  pn.param<bool>("ECEF2ENU", ENU_flag, false);
+  pn.param<int>("async_output_rate", async_output_rate, 20);
   pn.param<std::string>("serial_port", SensorPort, "/dev/ttyUSB0");
   pn.param<int>("serial_baud", SensorBaudrate, 115200);
   pn.param<int>("fixed_imu_rate", SensorImuRate, 800);
@@ -252,6 +257,13 @@ int main(int argc, char *argv[]){
   baseli_config = vs.readGpsCompassBaseline();
   ROS_INFO("Position:\t\t[%.2f, %.2f, %.2f]", baseli_config.position[0], baseli_config.position[1], baseli_config.position[2]);
   ROS_INFO("Uncertainty:\t\t[%.4f, %.4f, %.4f]\n", baseli_config.uncertainty[0], baseli_config.uncertainty[1], baseli_config.uncertainty[2]);
+  if (ENU_flag) ROS_INFO("XYZ output mode: ENU");
+  else          ROS_INFO("XYZ output mode: ECEF");
+  if (tf_ned_to_enu) ROS_INFO("Quaternion orientation mode: ENU");
+  else               ROS_INFO("Quaternion orientation mode: END");
+  if (frame_based_enu && tf_ned_to_enu) ROS_INFO("Rotation mode: Mathematically\n");
+  else if (!frame_based_enu && tf_ned_to_enu) ROS_INFO("Rotation mode: Manually\n");
+  else                 ROS_INFO("Rotation mode: No apply\n");
   cout << endl << endl << endl << endl;
 
   vs.writeSettings();
@@ -274,14 +286,14 @@ int main(int argc, char *argv[]){
     | INSGROUP_ACCELECEF,
     GPSGROUP_NONE);
 
-  msgKey.key = "ConStatus[%]";
+  msgKey.key = "ConnStatus[%]";
   vs.registerRawDataReceivedHandler(NULL, ConnectionState);
   ROS_INFO("Initial calibration ................................................");
-  // Thread::sleepSec(10);
+
   while (flag && flag2){
     vs.send("$VNRRG,98");
     vs.send("$VNRRG,86");
-    ConStatus.publish(msgKey);
+    ConnStatus.publish(msgKey);
   }
 
   vs.unregisterRawDataReceivedHandler();
@@ -291,7 +303,7 @@ int main(int argc, char *argv[]){
   vs.registerAsyncPacketReceivedHandler(NULL, asciiOrBinaryAsyncMessageReceived);
   ROS_INFO("bound..............................................................");
   while (!flag2){
-    ConStatus.publish(msgKey);
+    ConnStatus.publish(msgKey);
   }
 
   vs.unregisterAsyncPacketReceivedHandler();
@@ -324,24 +336,71 @@ void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index){
       msgIMU.orientation_covariance[4] = orientationStdDev[0] * orientationStdDev[0];
       msgIMU.orientation_covariance[8] = orientationStdDev[2] * orientationStdDev[2];
     }
-    // Quaternion
-    msgIMU.orientation.x = q[1];
-    msgIMU.orientation.y = q[0];
-    msgIMU.orientation.z = q[2];
-    msgIMU.orientation.w = q[3];
-    //cout << "Binary Async Quaternion: " << q << endl;
+    //Quaternion message comes in as a Yaw (z) pitch (y) Roll (x) format
+    if (tf_ned_to_enu){
+      // If we want the orientation to be based on the reference label on the imu
+      tf2::Quaternion tf2_quat(q[0],q[1],q[2],q[3]);
+      geometry_msgs::Quaternion quat_msg;
 
-    // Angular velocity
-    msgIMU.angular_velocity.x = ar[1];
-    msgIMU.angular_velocity.y = ar[0];
-    msgIMU.angular_velocity.z = ar[2];
-    //cout << "Binary Async Angular Rate: " << ar << endl;
+      if(frame_based_enu){
+        // Create a rotation from NED -> ENU
+        tf2::Quaternion q_rotate;
+        q_rotate.setRPY (M_PI, 0.0, M_PI/2);
+        // Apply the NED to ENU rotation such that the coordinate frame matches
+        tf2_quat = q_rotate*tf2_quat;
+        quat_msg = tf2::toMsg(tf2_quat);
 
-    // Linear acceleration
-    msgIMU.linear_acceleration.x = acel[1];
-    msgIMU.linear_acceleration.y = acel[0];
-    msgIMU.linear_acceleration.z = acel[2];
-    //cout << "Binary Async Aceletation: " << acel << endl;
+        // Since everything is in the normal frame, no flipping required
+        msgIMU.angular_velocity.x = ar[0];
+        msgIMU.angular_velocity.y = ar[1];
+        msgIMU.angular_velocity.z = ar[2];
+
+        msgIMU.linear_acceleration.x = acel[0];
+        msgIMU.linear_acceleration.y = acel[1];
+        msgIMU.linear_acceleration.z = acel[2];
+      }
+      else{
+        // put into ENU - swap X/Y, invert Z
+        quat_msg.x = q[1];
+        quat_msg.y = q[0];
+        quat_msg.z = -q[2];
+        quat_msg.w = q[3];
+
+        // Flip x and y then invert z
+        msgIMU.angular_velocity.x = ar[1];
+        msgIMU.angular_velocity.y = ar[0];
+        msgIMU.angular_velocity.z = -ar[2];
+        // Flip x and y then invert z
+        msgIMU.linear_acceleration.x = acel[1];
+        msgIMU.linear_acceleration.y = acel[0];
+        msgIMU.linear_acceleration.z = -acel[2];
+
+        if (cd.hasAttitudeUncertainty()){
+          vec3f orientationStdDev = cd.attitudeUncertainty();
+          msgIMU.orientation_covariance[0] = orientationStdDev[1]*orientationStdDev[1]*M_PI/180; // Convert to radians pitch
+          msgIMU.orientation_covariance[4] = orientationStdDev[0]*orientationStdDev[0]*M_PI/180; // Convert to radians Roll
+          msgIMU.orientation_covariance[8] = orientationStdDev[2]*orientationStdDev[2]*M_PI/180; // Convert to radians Yaw
+        }
+      }
+      msgIMU.orientation = quat_msg;
+    }
+    else
+    {
+        msgIMU.orientation.x = q[0];
+        msgIMU.orientation.y = q[1];
+        msgIMU.orientation.z = q[2];
+        msgIMU.orientation.w = q[3];
+
+        msgIMU.angular_velocity.x = ar[0];
+        msgIMU.angular_velocity.y = ar[1];
+        msgIMU.angular_velocity.z = ar[2];
+        msgIMU.linear_acceleration.x = acel[0];
+        msgIMU.linear_acceleration.y = acel[1];
+        msgIMU.linear_acceleration.z = acel[2];
+    }
+    // Covariances pulled from parameters
+    msgIMU.angular_velocity_covariance = angular_vel_covariance;
+    msgIMU.linear_acceleration_covariance = linear_accel_covariance;
     pubIMU.publish(msgIMU);
   }
   if (cd.hasYawPitchRoll()){
@@ -380,8 +439,8 @@ void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index){
       flag1 = 1;
     }
     //pos -= pos_o;
-    if (Ecef2NED_ena){
-      pos = ECEF2NED(pos,lla);
+    if (ENU_flag){
+      pos = ECEF2ENU(pos,lla);
     }
     msgOdom.pose.pose.position.x = pos[0];
     msgOdom.pose.pose.position.y = pos[1];
@@ -609,12 +668,12 @@ void ClearCharArray(char *Data, int length){
   }
 }
 
-vec3d ECEF2NED(vec3d posECEF, vec3d lla){
+vec3d ECEF2ENU(vec3d posECEF, vec3d lla){
   #include <math.h>
   // Convert ECEF to NED
   // https://www.mathworks.com/help/aeroblks/directioncosinematrixeceftoned.html
-  double lat_r = lla[0]*PI/180.0;// Lat in rad
-  double lon_r = lla[1]*PI/180.0;// Long in rad
+  double lat_r = lla[0]*M_PI/180.0;// Lat in rad
+  double lon_r = lla[1]*M_PI/180.0;// Long in rad
   cout << "lat:" << lat_r << ", lon:" << lon_r << endl;
   mat3d DCM;
   DCM.e00 = -1.0*sin(lat_r)*cos(lon_r);
@@ -626,11 +685,11 @@ vec3d ECEF2NED(vec3d posECEF, vec3d lla){
   DCM.e20 = -1.0*cos(lat_r)*cos(lon_r);
   DCM.e21 = cos(lat_r)*sin(lon_r);
   DCM.e22 = -1.0*sin(lat_r);
-  vec3d pos_NED;
-  pos_NED.x = DCM.e00*posECEF.x + DCM.e01*posECEF.y + DCM.e02*posECEF.z;
-  pos_NED.y = DCM.e10*posECEF.x + DCM.e11*posECEF.y + DCM.e12*posECEF.z;
-  pos_NED.z = DCM.e20*posECEF.x + DCM.e21*posECEF.y + DCM.e22*posECEF.z;
+  vec3d pos_ENU;
+  pos_ENU.x = DCM.e00*posECEF.x + DCM.e01*posECEF.y + DCM.e02*posECEF.z;
+  pos_ENU.y = DCM.e10*posECEF.x + DCM.e11*posECEF.y + DCM.e12*posECEF.z;
+  pos_ENU.z = DCM.e20*posECEF.x + DCM.e21*posECEF.y + DCM.e22*posECEF.z;
   cout << DCM << endl;
-  cout << pos_NED << endl;
-  //return pos_NED;
+  cout << pos_ENU << endl;
+  //return pos_ENU;
 }
