@@ -177,16 +177,14 @@ int main(int argc, char *argv[]){
   ROS_INFO("New resgister configuration.........................................");
   vs.writeAsyncDataOutputFrequency(async_output_rate); // see table 6.2.8
   uint32_t newHz = vs.readAsyncDataOutputFrequency();
-  ROS_INFO("Async output frequency:\t%d Hz", newHz);
 
   //added by Harold
   ImuRateConfigurationRegister IMUR = vs.readImuRateConfiguration();
   IMUR.imuRate = SensorImuRate;
   vs.writeImuRateConfiguration(IMUR);
   IMUR = vs.readImuRateConfiguration();
-  ROS_INFO("IMU Frequency:\t\t%d Hz", IMUR.imuRate);
 
-  ROS_INFO("...VPE Resgister....................................................");
+  /* VPE Resgister */
   VpeBasicControlRegister vpeReg = vs.readVpeBasicControl();
   // Enable *********************************************************************
   vpeReg.enable = VPEENABLE_ENABLE;
@@ -195,36 +193,28 @@ int main(int argc, char *argv[]){
   // vpeReg.headingMode = HEADINGMODE_ABSOLUTE;
   // vpeReg.headingMode = HEADINGMODE_INDOOR;
   // Filtering Mode *************************************************************
+  //vpeReg.filteringMode = VPEMODE_OFF;
   vpeReg.filteringMode = VPEMODE_MODE1;
   // Tuning Mode ****************************************************************
   // vpeReg.tuningMode = VPEMODE_OFF;
   vpeReg.tuningMode = VPEMODE_MODE1;
   vs.writeVpeBasicControl(vpeReg);
-  vpeReg = vs.readVpeBasicControl();
-  ROS_INFO("Enable:\t\t%d", vpeReg.enable);
-  ROS_INFO("Heading Mode:\t%d", vpeReg.headingMode);
-  ROS_INFO("Filtering Mode:\t%d", vpeReg.filteringMode);
-  ROS_INFO("Tuning Mode:\t%d", vpeReg.tuningMode);
-  ROS_INFO("...INS Resgister....................................................");
 
+  /* INS Resgister */
   InsBasicConfigurationRegisterVn300 InsReg = vs.readInsBasicConfigurationVn300();
   // Scenario *******************************************************************
   //InsReg.scenario = SCENARIO_AHRS;
-  //InsReg.scenario = SCENARIO_INSWITHPRESSURE;
+  InsReg.scenario = SCENARIO_INSWITHPRESSURE;
   //InsReg.scenario = SCENARIO_INSWITHOUTPRESSURE;
   //InsReg.scenario = SCENARIO_GPSMOVINGBASELINEDYNAMIC;
-  InsReg.scenario = SCENARIO_GPSMOVINGBASELINESTATIC;
+  //InsReg.scenario = SCENARIO_GPSMOVINGBASELINESTATIC;
   // Ahrs Aiding ****************************************************************
   InsReg.ahrsAiding = 1;
   // Estimation Base line *******************************************************
   InsReg.estBaseline = 1;
   vs.writeInsBasicConfigurationVn300(InsReg); //added by Harold
-  InsReg = vs.readInsBasicConfigurationVn300(); //added by Harold
-  ROS_INFO("Scenario:\t%d", InsReg.scenario);
-  ROS_INFO("AHRS Aiding:\t%d", InsReg.ahrsAiding);
-  ROS_INFO("Base Line:\t%d", InsReg.estBaseline);
 
-  ROS_INFO("...HIS Calibration........Pres..........................................");
+  /* HIS Calibration */
   MagnetometerCalibrationControlRegister hsiReg = vs.readMagnetometerCalibrationControl();
   // HSI Mode *******************************************************************
   hsiReg.hsiMode = HSIMODE_RUN;
@@ -233,30 +223,55 @@ int main(int argc, char *argv[]){
   hsiReg.hsiOutput = HSIOUTPUT_USEONBOARD;
   //hsiReg.hsiOutput = HSIOUTPUT_NOONBOARD;
   vs.writeMagnetometerCalibrationControl(hsiReg);  //added by Harold
-  hsiReg = vs.readMagnetometerCalibrationControl();//added by Harold
-  ROS_INFO("Mode:\t%d", hsiReg.hsiMode);
-  ROS_INFO("Output:\t%d\n", hsiReg.hsiOutput);
 
-  ROS_INFO("BaseLine Configuration..............................................");
+  /* BaseLine Configuration */
   /// BaseLine and Antenna A offset Configuration
   vs.writeGpsAntennaOffset(Antenna_A_offset);
-  vec3f Ant_offset = vs.readGpsAntennaOffset();
-  ROS_INFO("Antena A offset:\t[%.2f, %.2f, %.2f]", Ant_offset[0], Ant_offset[1], Ant_offset[2]);
   GpsCompassBaselineRegister baseli_config = vs.readGpsCompassBaseline();
   baseli_config.position = baseline_position;
   // Uncertainty calculation
   float max = 0;
   for (int i = 0; i < 3; i++){
-    if (baseli_config.position[i] > max){
+    if (baseli_config.position[i] > max)
       max = baseli_config.position[i];
-    }
   }
   baseli_config.uncertainty = {max * 0.025, max * 0.025, max * 0.025};
-  // baseli_config.uncertainty = {0.00875, 0.00875, 0.00875 };
   vs.writeGpsCompassBaseline(baseli_config);
+
+  /* Save on flash memory all configurations */
+  vs.writeSettings();
+
+  /* --------------------------------------- */
+  /* ------- Read all configurations ------- */
+  /* --------------------------------------- */
+  ROS_INFO("Async output frequency:\t%d Hz", newHz);
+  ROS_INFO("IMU Frequency:\t\t%d Hz", IMUR.imuRate);
+  /* VPE Resgister */
+  ROS_INFO("...VPE Resgister....................................................");
+  vpeReg = vs.readVpeBasicControl();
+  ROS_INFO("Enable:\t\t%d", vpeReg.enable);
+  ROS_INFO("Heading Mode:\t%d", vpeReg.headingMode);
+  ROS_INFO("Filtering Mode:\t%d", vpeReg.filteringMode);
+  ROS_INFO("Tuning Mode:\t%d", vpeReg.tuningMode);
+  /* INS Resgister */
+  ROS_INFO("...INS Resgister....................................................");
+  InsReg = vs.readInsBasicConfigurationVn300(); //added by Harold
+  ROS_INFO("Scenario:\t%d", InsReg.scenario);
+  ROS_INFO("AHRS Aiding:\t%d", InsReg.ahrsAiding);
+  ROS_INFO("Base Line:\t%d", InsReg.estBaseline);
+  /* HIS Calibration */
+  ROS_INFO("...HIS Calibration..................................................");
+  hsiReg = vs.readMagnetometerCalibrationControl();//added by Harold
+  ROS_INFO("Mode:\t%d", hsiReg.hsiMode);
+  ROS_INFO("Output:\t%d\n", hsiReg.hsiOutput);
+  /* BaseLine Configuration */
+  ROS_INFO("BaseLine Configuration..............................................");
+  vec3f Ant_offset = vs.readGpsAntennaOffset();
+  ROS_INFO("Antena A offset:\t[%.2f, %.2f, %.2f]", Ant_offset[0], Ant_offset[1], Ant_offset[2]);
   baseli_config = vs.readGpsCompassBaseline();
   ROS_INFO("Position:\t\t[%.2f, %.2f, %.2f]", baseli_config.position[0], baseli_config.position[1], baseli_config.position[2]);
   ROS_INFO("Uncertainty:\t\t[%.4f, %.4f, %.4f]\n", baseli_config.uncertainty[0], baseli_config.uncertainty[1], baseli_config.uncertainty[2]);
+  ROS_INFO("Convertion Configuration..............................................");
   if (ENU_flag) ROS_INFO("XYZ output mode: ENU");
   else          ROS_INFO("XYZ output mode: ECEF");
   if (tf_ned_to_enu) ROS_INFO("Quaternion orientation mode: ENU");
@@ -266,7 +281,6 @@ int main(int argc, char *argv[]){
   else                 ROS_INFO("Rotation mode: No apply\n");
   cout << endl << endl << endl << endl;
 
-  vs.writeSettings();
   BinaryOutputRegister bor(
     ASYNCMODE_PORT1,
     SensorImuRate / async_output_rate,  // update rate [ms]
@@ -398,6 +412,18 @@ void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index){
         msgIMU.linear_acceleration.y = acel[1];
         msgIMU.linear_acceleration.z = acel[2];
     }
+    msgOdom.pose.pose.orientation.x = msgIMU.orientation.x;
+    msgOdom.pose.pose.orientation.y = msgIMU.orientation.y;
+    msgOdom.pose.pose.orientation.z = msgIMU.orientation.z;
+    msgOdom.pose.pose.orientation.w = msgIMU.orientation.w;
+
+    msgOdom.twist.twist.linear.x = msgIMU.angular_velocity.x;
+    msgOdom.twist.twist.linear.y = msgIMU.angular_velocity.y;
+    msgOdom.twist.twist.linear.z = msgIMU.angular_velocity.z;
+
+    msgOdom.twist.twist.angular.x = msgIMU.linear_acceleration.x;
+    msgOdom.twist.twist.angular.y = msgIMU.linear_acceleration.y;
+    msgOdom.twist.twist.angular.z = msgIMU.linear_acceleration.z;
     // Covariances pulled from parameters
     msgIMU.angular_velocity_covariance = angular_vel_covariance;
     msgIMU.linear_acceleration_covariance = linear_accel_covariance;
@@ -447,28 +473,7 @@ void asciiOrBinaryAsyncMessageReceived(void* userData, Packet& p, size_t index){
     msgOdom.pose.pose.position.z = pos[2];
     // cout << "Binary Async GPS_ECEF: " << pos << endl;
 
-    if (cd.hasQuaternion()){
-      vec4f q = cd.quaternion();
-      msgOdom.pose.pose.orientation.x = q[0];
-      msgOdom.pose.pose.orientation.y = q[1];
-      msgOdom.pose.pose.orientation.z = q[2];
-      msgOdom.pose.pose.orientation.w = q[3];
-    }
-    if (cd.hasVelocityEstimatedBody()){
-      vec3f vel = cd.velocityEstimatedBody();
-      msgOdom.twist.twist.linear.x = vel[0];
-      msgOdom.twist.twist.linear.y = vel[1];
-      msgOdom.twist.twist.linear.z = vel[2];
-      //cout << "Binary Async linear vel: " << vel << endl;
-    }
-    if (cd.hasAngularRate()){
-      vec3f ar = cd.angularRate();
-      msgOdom.twist.twist.angular.x = ar[0];
-      msgOdom.twist.twist.angular.y = ar[1];
-      msgOdom.twist.twist.angular.z = ar[2];
-      //cout << "Binary Async angRate: " << ar << endl;
-      pubOdom.publish(msgOdom);
-    }
+    pubOdom.publish(msgOdom);
   }
 
   // Temperature
